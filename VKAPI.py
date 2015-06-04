@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Author: Polyakov Konstantin (Ra93POL)
-import urllib, urllib2, lxml.html, cookielib
+# Date: 01.06.2015 - 04.06.2015
+import urllib, urllib2, lxml.html, cookielib, md5
 
 def getAnswer(url_server, api_name, params={}, method="get", headers={}):
     if method == "get":
@@ -122,24 +123,32 @@ class VK():
             k, v = kv.split("=")
             self.app_data[k] = v
 
-    def api(self, method_name, params):
-        params = urllib.urlencode(params)
-        url = "https://api.vk.com/method/%s?%s&access_token=%s&" + urllib.urlencode(self.settings_api)
-        url = url % (method_name, params, self.app_data['access_token'])
-        res = self.opener.open(url)
-        if not self.acseessPermission['nohttps']: pass
+    def api(self, method_name, GET={}, POST={}):
+        GET = urllib.urlencode(GET)
+        POST = urllib.urlencode(POST)
+        #url = "https://api.vk.com/method/%s?%s&access_token=%s&" + urllib.urlencode(self.settings_api)
+        url = "https://api.vk.com"
+        query = "/method/%s?%saccess_token=%s&" + urllib.urlencode(self.settings_api)
+        if GET != '': GET += '&'
+        if POST != '': _POST = '&'+POST
+        else: _POST = ''
+        query = query % (method_name, GET, self.app_data['access_token'])
+        if self.acseessPermission['nohttps']:
+            sig = '&sig='+md5.new(query+_POST+self.app_data['secret']).hexdigest()
+        else: sig = ''
+        res = self.opener.open(url+query+sig, POST)
         return res.read()
 
 ### Example
 
-vk = VK(1112223, "your email", "password")
+vk = VK(1112223, "email", "password")
 vk.do_authorize()
 
 import time
 
 parametrs2 = {
     "owner_id": vk.app_data['user_id'],
-    "message": "Hello world!"
+    "message": "nohttp = 0"
     }
 print vk.api("wall.post", parametrs2)
 #x = 0
