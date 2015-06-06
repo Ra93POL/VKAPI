@@ -1,0 +1,16 @@
+vk.com
+client_id = 
+email or phone = 
+password = 
+
+ok.ru
+client_id = 
+email = 
+password = 
+public application key = 
+
+disk.yandex.ru
+client_id = 
+login = 
+password = 
+public application key = 
