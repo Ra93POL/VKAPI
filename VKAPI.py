@@ -2,11 +2,12 @@
 # Author: Polyakov Konstantin (Ra93POL)
 # Date: 01.06.2015 - 06.06.2015
 import urllib, urllib2, lxml.html, cookielib, md5, json, urlparse
+import dataMngt
 
 oauth_data = {
     'vk.com': {
         'scope_separator': ',',
-        'url_toopendialog': 'https://oauth.vk.com/authorize?',
+        'url_toopendialog': 'https://oauth.vk.com/authorize',
         'url_api': 'https://api.vk.com',
         'query': '/method/',
         'uri_redirect': 'https://oauth.vk.com/blank.html',
@@ -17,7 +18,7 @@ oauth_data = {
         },
     'ok.ru': {
         'scope_separator': ';',
-        'url_toopendialog': 'http://www.odnoklassniki.ru/oauth/authorize?',
+        'url_toopendialog': 'http://www.odnoklassniki.ru/oauth/authorize',
         'url_api': 'http://api.ok.ru',
         'query': '/fb.do?',
         'uri_redirect': 'http://api.ok.ru/blank.html',
@@ -29,7 +30,7 @@ oauth_data = {
         },
     'disk.yandex.ru': {
         'scope_separator': None,
-        'url_toopendialog': 'https://oauth.yandex.ru/authorize?',
+        'url_toopendialog': 'https://oauth.yandex.ru/authorize',
         'url_api': 'https://webdav.yandex.ru',
         'query': None,
         'uri_redirect': 'https://oauth.yandex.ru/verification_code',
@@ -66,41 +67,87 @@ acceessPermission = {
     'ok.ru': {
         'PHOTO_CONTENT': 1,
         'SET_STATUS': 1,
-        'VALUABLE_ACCESS': 0,
-        'GROUP_CONTENT': 0,
-        'VIDEO_CONTENT': 0,
-        'APP_INVITE': 0,
-        'MESSAGING': 0
+        'VALUABLE_ACCESS': 1,
+        'GROUP_CONTENT': 1,
+        'VIDEO_CONTENT': 1,
+        'APP_INVITE': 1,
+        'MESSAGING': 1
         },
     'disk.yandex.ru': {} # указываются только на сайте Яндекса
-}
+}        
 
-def load_user_data():
-    f = open('data/user_data.txt', 'r')
-    raw_user_data = f.read()
+def save_log(name, page, answer):
+    name = str(name)
+    f = open('oauth/logs/%s.html' % name, 'w')
+    f.write(str(page))
     f.close()
-    raw_user_data = raw_user_data.split('\n\n')
-    user_data = {}
-    for raw_user_data_site in raw_user_data:
-        raw_user_data_site = raw_user_data_site.split('\n')
-        site = raw_user_data_site.pop(0)
-        user_data[site] = []
-        for data in raw_user_data_site:
-            user_data[site].append(data.split('=', 1)[1].strip())
-    return user_data
+
+    f = open('oauth/logs/%s.txt' % name, 'w')
+    f.write(answer.geturl())
+    f.write('\n\n')
+    f.write(str(answer.code) + ' ' + answer.msg)
+    f.write('\n')
+    f.write(str(answer.info()))
+    f.close()
+
+def open_url(url, name, opener, POST=None, GET=None):
+    if 'dict' in str(type(POST)): POST = urllib.urlencode(POST)
+    if 'dict' in str(type(GET)): GET = urllib.urlencode(GET)
+
+    if GET == None and POST == None: res = opener.open(url)
+    elif GET != None and POST != None: res = opener.open(url +'?'+ GET, POST)
+    elif GET == None: res = opener.open(url, POST)
+    elif POST == None: res = opener.open(url +'?'+ GET)
+    str_page = res.read()
+    save_log(name, str_page, res)
+    return str_page, res
+
+def get_from_form(str_page, response, opener=None):
+    page = lxml.html.document_fromstring(str_page)
+    if len(page.forms) == 1: form = page.forms[0]
+    else: form = page.forms[1] # для Яндекса на этапе полтверждения прав:(
+    # Собираем параметры
+    key_value = {}
+    for inpt in form.inputs:
+        value = inpt.value
+        name = inpt.name
+        if None not in [name, value]: key_value[name] = value.encode('utf-8')
+    #if key_value.has_key(None): del key_value[None] # У кнопки обычно нет имени.
+    # Извлекаем адрес отправки формы
+    action_url = form.action
+    if action_url == None: action_url = response.geturl()
+
+    parts = urlparse.urlsplit(action_url)
+    # если относительный адрес...
+    if parts.scheme == '' and parts.netloc == '':
+        # относительно сервера
+        if action_url[0] == '/':
+            netloc = urlparse.urlsplit(response.geturl()).netloc
+            action_url = 'https://' + netloc + action_url
+        # относительно адреса текущей страницы
+        else: action_url = response.geturl() +'/'+ action_url
+        #print 'action url after parse: ', action_url
+
+    # проверяем наличие капчи (for vk.com only)
+    if key_value.has_key('captcha_key'):
+        img = form.cssselect('img.captcha_img')[0]
+        captcha_url = img.attrib['src']
+        captcha_img = opener.open(captcha_url).read()
+        dataMngt.write('oauth/logs/captcha.jpg', captcha_img, 'wb')
+        captcha_key = raw_input('Input the captcha number:')
+        key_value['captcha_key'] = captcha_key
+    return key_value, action_url
 
 class VK():
     settings_api = {"lang": "ru", "v": 5.33, "https": 0, "test_mode": 0}
     user_data = {}
     app_data = {}
-    # https://vk.com/dev/permissions
+    openers = {}
+    print_log = True
     def __init__(self, user_data):
         self.user_data = user_data
-        cookieJar = cookielib.CookieJar()
-        self.opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cookieJar))
-        urllib2.install_opener(self.opener)
 
-    def get_scope_parametr(self, site):
+    def _get_scope_parametr(self, site):
         """ Формирование значения параметра scope - списка прав доступа"""
         scope = ""
         for key, value in acceessPermission[site].items():
@@ -108,61 +155,35 @@ class VK():
         if len(scope) > 1: scope = scope[:-1]
         return scope
 
-    def save(self, name, page, answer):
-        name = str(name)
-        f = open('logs/%s.html' % name, 'w')
-        f.write(str(page))
-        f.close()
-
-        f = open('logs/%s.txt' % name, 'w')
-        f.write(answer.geturl())
-        f.write('\n\n')
-        f.write(str(answer.code) + ' ' + answer.msg)
-        f.write('\n')
-        f.write(str(answer.info()))
-        f.close()
-
-    def get_from_form(self, str_page, response):
-        page = lxml.html.document_fromstring(str_page)
-        if len(page.forms) == 1: form = page.forms[0]
-        else: form = page.forms[1] # для Яндекса на этапе полтверждения прав:(
-        # Собираем параметры
-        key_value = {}
-        for inpt in form.inputs:
-            key_value[inpt.name] = inpt.value
-        if key_value.has_key(None): del key_value[None] # У кнопки обычно нет имени.
-        # Извлекаем адрес отправки формы
-        action_url = form.action
-        if action_url == None: action_url = response.geturl()
-
-        parts = urlparse.urlsplit(action_url)
-        # если относительный адрес...
-        if parts.scheme == '' and parts.netloc == '':
-            # относительно сервера
-            if action_url[0] == '/':
-                netloc = urlparse.urlsplit(response.geturl()).netloc
-                action_url = 'https://' + netloc + action_url
-            # относительно адреса текущей страницы
-            else: action_url = response.geturl() +'/'+ action_url
-            #print 'action url after parse: ', action_url
-        return key_value, action_url
-
-    def extract_app_data(self, response):
+    def _extract_app_data(self, response):
         fragment = urlparse.urlparse(response.geturl()).fragment
         app_data = urlparse.parse_qs(fragment)
         for k in app_data: app_data[k] = app_data[k][0]
         return app_data
 
-    def is_there_token(self, response):
+    def _is_there_token(self, response):
         fragment = urlparse.urlparse(response.geturl()).fragment
         app_data = urlparse.parse_qs(fragment)
         if app_data.has_key('access_token'): return True
         else: return False
 
+    def _is_frozen(self, str_page):
+        str_page = str_page.replace('text_panel login_blocked_panel', 'text_panel_login_blocked_panel')
+        page = lxml.html.document_fromstring(str_page)
+        div = page.cssselect('div.text_panel_login_blocked_panel')
+        if len(div) == 1:
+            print div[0].text
+            return True
+        else: return False
+
     def do_authorize(self, site):
+        cookieJar = cookielib.CookieJar()
+        self.openers[site] = urllib2.build_opener(urllib2.HTTPCookieProcessor(cookieJar))
+        #urllib2.install_opener(self.openers[site])
+
         params = {"client_id": self.user_data[site][0],
                   "redirect_uri": oauth_data[site]['uri_redirect'],
-                  "scope": self.get_scope_parametr(site),
+                  "scope": self._get_scope_parametr(site),
                   "response_type": "token",
                   'state': ''
                   }
@@ -173,48 +194,43 @@ class VK():
         elif site == 'disk.yandex.ru': params['display'] = 'popup'
 
         print site+u': Открываем страницу для логининга...'
-        req = urllib2.Request(oauth_data[site]['url_toopendialog'] + urllib.urlencode(params))
-        #print 'Req. url:', req.get_full_url(), '\n'
-        answer = self.opener.open(req)
-        str_page = answer.read()
-        self.save(1, str_page, answer)
-        params2, action_url = self.get_from_form(str_page, answer)
+        str_page, res = open_url(oauth_data[site]['url_toopendialog'], 1, self.openers[site], GET=params)
+        params2, action_url = get_from_form(str_page, res)
         params2[oauth_data[site]['name_for_email']] = self.user_data[site][1]
         params2[oauth_data[site]['name_for_password']] = self.user_data[site][2]
 
         print site+u': Логинимся...'
-        req = urllib2.Request(action_url, urllib.urlencode(params2))
-        #print req.get_full_url(), '\n'
-        answer = self.opener.open(req, urllib.urlencode(params2))
+        str_page, res = open_url(action_url, 2, self.openers[site], POST=params2)
         # Если вместо страницы логининга была страница подтверждения прав
         # (т. е. мы уже были залогинены), то вынимаем токен.
-        if not self.is_there_token(answer):
-            str_page = answer.read()
-            self.save(2, str_page, answer)
-            params2, action_url = self.get_from_form(str_page, answer)
-            params2 = urllib2.urlparse.urlparse(action_url).query +"&"+ urllib.urlencode(params2)
+        if not self._is_there_token(res):
+            if self._is_frozen(str_page): return 'frozen'
+            params2, action_url = get_from_form(str_page, res, self.openers[site])
+            # если мы вводили капчу
+            if params.has_key(oauth_data[site]['name_for_password']):
+                params2[oauth_data[site]['name_for_email']] = self.user_data[site][1]
+                params2[oauth_data[site]['name_for_password']] = self.user_data[site][2]
+            params2 = urlparse.urlparse(action_url).query +"&"+ urllib.urlencode(params2)
 
             print site+u': Подтверждаем права доступа...'
-            req = urllib2.Request(action_url, params2)
-            answer = self.opener.open(req, params2)
-            self.save(3, answer.read(), answer)
+            str_page, res = open_url(action_url, 3, self.openers[site], POST=params2)
         else: print site+u': Пользователь был залогинен ранее.'
 
         print site+u': Сохраняем токен доступа.\n'
-        self.app_data[site] = self.extract_app_data(answer)
+        self.app_data[site] = self._extract_app_data(res)
 
     def _process_response(self, res, site):
         res = json.loads(res.read())
-        print '\nResponse from '+site+':\n  ', res
+        if self.print_log: print '\nResponse from '+site+':\n  ', res
         if site == 'vk.com':
-            if res.has_key('response'): return res['response']
-            if res.has_key('error'):
+            if res.has_key('response'): return 'success', res['response']
+            elif res.has_key('error'):
                 res = res['error']
-                print 'Error: ', res['error_code'], res['error_msg']
+                return 'error', {'code': res['error_code'], 'msg': res['error_msg']}
         elif site == 'ok.ru':
-            if res in [True, False]: return res
-            if res.has_key('error_data'):
-                print 'Error:', res['error_code'], res['error_msg']
+            if res in [True, False]: return 'success', res
+            elif res.has_key('error_data'):
+                return 'error', {'code': res['error_code'], 'msg': res['error_msg']}
 
     def api(self, site, method_name, GET={}, POST={}):
         if site == 'vk.com':
@@ -228,7 +244,7 @@ class VK():
             if acceessPermission[site]['nohttps']:
                 sig = '&sig='+md5.new(query+_POST+self.app_data[site]['secret']).hexdigest()
             else: sig = ''
-            res = self.opener.open(url+query+sig, POST) 
+            res = self.openers[site].open(url+query+sig, POST) 
         elif site == 'ok.ru': 
             GET['application_key'] = self.user_data[site][3]
             GET['method'] = method_name
@@ -244,31 +260,7 @@ class VK():
 
             if self.app_data[site].has_key('api_server'): url = self.app_data[site]['api_server']
             else: url = oauth_data[site]['url_api']
-            res = self.opener.open(url + oauth_data[site]['query'] + urllib.urlencode(GET))
+            res = self.openers[site].open(url + oauth_data[site]['query'] + urllib.urlencode(GET))
         elif site == 'disk.yandex.ru': pass
         
         return self._process_response(res, site)
-
-################## Example ##################
-
-user_data = load_user_data()
-vk = VK(user_data)
-
-vk.do_authorize('vk.com')
-vk.do_authorize('ok.ru')
-vk.do_authorize('disk.yandex.ru')
-print vk.app_data
-
-#parametrs2 = {}
-#vk.api('', parametrs2)
-
-parametrs2 = {
-    'owner_id': vk.app_data['vk.com']['user_id'],
-    'message': 'Test (wall.post method)'
-    }
-parametrs3 = {
-    'photo_id': 802371866404,
-    'description': 'Test (photos.editPhoto method)'
-    }
-vk.api('vk.com', 'wall.post', parametrs2)
-vk.api('ok.ru', 'photos.editPhoto', parametrs3)
